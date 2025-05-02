@@ -66,7 +66,7 @@ setup(
     package_data={
         "": ["*.yaml"],
     },
-    install_requires=requirements,
+    # install_requires=requirements,
     extras_require={
         "dev": dev_requirements,
         "extras": extras_requirements,
