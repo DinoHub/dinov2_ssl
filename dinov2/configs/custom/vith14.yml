@@ -1,0 +1,4 @@
+model:
+  arch: vit_huge
+  patch_size: 14
+  block_chunks: 4

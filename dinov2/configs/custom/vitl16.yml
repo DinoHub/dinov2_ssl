@@ -1,0 +1,9 @@
+train:                           # For DINOv2 only
+  OFFICIAL_EPOCH_LENGTH: 11482   # For DINOv2 only; 2_683_401//256 = 10_482
+  batch_size_per_gpu: 64         # For DINOv2 only; total batch size = 64 * 4 GPUs = 256
+student:
+  arch: vit_large
+  drop_path_rate: 0.4
+  block_chunks: 4
+evaluation:                      # For DINOv2 only
+  eval_period_iterations: 11482  # For DINOv2 only; 2_683_401//256 = 10_482

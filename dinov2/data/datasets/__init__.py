@@ -20,3 +20,4 @@ from .image_ship_id_1M import ImageShipID_1M
 from .image_ship_id_200k import ImageShipID_200k
 from .image_ship_id_25k import ImageShipID_25k
 from .image_ship_ood import ImageShipOOD
+from .dinov2dataset import DINOv2Dataset

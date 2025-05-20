@@ -10,7 +10,7 @@ from typing import Any, Callable, List, Optional, TypeVar
 import torch
 from torch.utils.data import Sampler
 
-from .datasets import ImageNet, ImageNet22k, ImageShipID, ImageShipID_Extra, ImageShipID_20P, ImageShipID_40P, ImageShipID_60P, ImageShipID_80P, ImageShipOOD, ImageShipID_100I, ImageShipID_500I, ImageShipID_1000I, ImageShipID_5000I, ImageShipID_10000I, ImageShipID_1M, ImageShipID_200k, ImageShipID_25k
+from .datasets import ImageNet, ImageNet22k, ImageShipID, ImageShipID_Extra, ImageShipID_20P, ImageShipID_40P, ImageShipID_60P, ImageShipID_80P, ImageShipOOD, ImageShipID_100I, ImageShipID_500I, ImageShipID_1000I, ImageShipID_5000I, ImageShipID_10000I, ImageShipID_1M, ImageShipID_200k, ImageShipID_25k, DINOv2Dataset
 from .samplers import EpochSampler, InfiniteSampler, ShardedInfiniteSampler, ShardedInfiniteBalancedSampler
 
 
@@ -119,6 +119,8 @@ def _parse_dataset_str(dataset_str: str):
         class_ = ImageShipOOD
         if "split" in kwargs:
             kwargs["split"] = ImageShipOOD.Split[kwargs["split"]]
+    elif name == "DINOv2Dataset":
+        class_ = DINOv2Dataset
     else:
         raise ValueError(f'Unsupported dataset "{name}"')
 

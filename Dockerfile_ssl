@@ -1,0 +1,62 @@
+# docker build -f Dockerfile_ssl -t vit_dinov2:2.0 .
+
+# MUST USE PYTHON >=3.9
+# FROM nvidia/cuda:12.0.0-cudnn8-devel-ubuntu22.04
+FROM nvidia/cuda:11.8.0-cudnn8-devel-ubuntu22.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+ENV cwd="/home/"
+WORKDIR $cwd
+
+ENV LC_ALL=C.UTF-8
+ENV LANG=C.UTF-8
+ENV TZ=Asia/Singapore
+RUN ln -snf /usr/share/zoneinfo/$TZ /etc/localtime && echo $TZ > /etc/timezone
+
+ENV FORCE_CUDA="1"
+ENV TORCH_CUDA_ARCH_LIST="7.0 7.5 8.0 8.6 9.0+PTX"
+
+RUN apt-get -y update && \
+    apt-get -y upgrade && \
+    apt -y update
+
+RUN apt-get install --no-install-recommends -y \
+    software-properties-common \
+    build-essential \
+    git \
+    python3-dev \
+    python3-pip
+
+RUN apt-get clean && rm -rf /tmp/* /var/tmp/* /var/lib/apt/lists/* && apt-get -y autoremove
+
+RUN rm -rf /var/cache/apt/archives/
+
+### APT END ###
+
+RUN python3 -m pip install --upgrade pip setuptools wheel
+
+RUN pip3 install --no-cache-dir \
+    albumentations \
+    fvcore \
+    matplotlib \
+    omegaconf \
+    pandas \
+    scikit-learn \
+    tensorboard \
+    timm
+
+RUN pip3 install --no-cache-dir \
+    torchvision --index-url https://download.pytorch.org/whl/cu121 \
+    xformers --index-url https://download.pytorch.org/whl/cu121
+
+RUN pip3 install --no-cache-dir \
+    boto3 \
+    clearml \
+    hpbandster \
+    optuna
+
+# RUN pip3 install 'git+https://github.com/DinoHub/dinov2_ssl.git'
+
+# ENTRYPOINT bash
+CMD pip install -e . && bash
