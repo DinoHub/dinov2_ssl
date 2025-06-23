@@ -27,6 +27,8 @@ from dinov2.train.ssl_meta_arch import SSLMetaArch
 torch.backends.cuda.matmul.allow_tf32 = True  # PyTorch 1.12 sets this to False by default
 logger = logging.getLogger("dinov2")
 
+os.environ['XFORMERS_DISABLED'] = '1'
+
 
 def get_args_parser(add_help: bool = True):
     parser = argparse.ArgumentParser("DINOv2 training", add_help=add_help)

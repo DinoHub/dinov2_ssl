@@ -21,7 +21,7 @@ def load_pretrained_weights(model, pretrained_weights, checkpoint_key):
     if urlparse(pretrained_weights).scheme:  # If it looks like an URL
         state_dict = torch.hub.load_state_dict_from_url(pretrained_weights, map_location="cpu")
     else:
-        state_dict = torch.load(pretrained_weights, map_location="cpu")
+        state_dict = torch.load(pretrained_weights, map_location="cpu", weights_only=True)
     if checkpoint_key is not None and checkpoint_key in state_dict:
         logger.info(f"Take key {checkpoint_key} in provided checkpoint dict")
         state_dict = state_dict[checkpoint_key]
@@ -78,6 +78,8 @@ class CosineScheduler(object):
         schedule = final_value + 0.5 * (base_value - final_value) * (1 + np.cos(np.pi * iters / len(iters)))
         self.schedule = np.concatenate((freeze_schedule, warmup_schedule, schedule))
 
+        print(f'self.schedule: {self.schedule}')
+        print(f'self.total_iters: {self.total_iters}')
         assert len(self.schedule) == self.total_iters
 
     def __getitem__(self, it):

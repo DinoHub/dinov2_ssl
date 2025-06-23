@@ -1,4 +1,5 @@
 import logging
+import numpy as np
 from pathlib import Path
 from typing import Callable, Optional, Union
 
@@ -45,6 +46,10 @@ class DINOv2Dataset(ExtendedVisionDataset):
     def get_target(self, index: int) -> Optional[Target]:
         """Return the target label for the image at the given index."""
         return self.targets[index]
+
+    def get_targets(self) -> Optional[np.ndarray]:
+        """Return all target labels for the dataset."""
+        return np.array(self.targets)
 
     def __len__(self):
         """Returns the number of images in the dataset."""

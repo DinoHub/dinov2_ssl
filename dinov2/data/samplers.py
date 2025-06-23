@@ -4,14 +4,20 @@
 # found in the LICENSE file in the root directory of this source tree.
 
 import itertools
+import math
+import random
+from operator import itemgetter
 from typing import Any, Optional, List, Union, Iterator
 import warnings
 
 import numpy as np
 import torch
+import torch.distributed as dist
+from torch.utils.data import DistributedSampler
 from torch.utils.data.sampler import Sampler
 
 import dinov2.distributed as distributed
+from dinov2.data.datasets.dataset_from_sampler import DatasetFromSampler
 
 
 class EpochSampler(Sampler):
@@ -371,3 +377,211 @@ class ShardedInfiniteBalancedSampler(Sampler):
         Returns the nominal size of one 'cycle': samples_per_class * number of classes.
         """
         return self._sample_count
+
+class BalanceClassSampler(Sampler):
+    """Allows you to create stratified sample on unbalanced classes.
+
+    Args:
+        labels: list of class label for each elem in the dataset
+        mode: Strategy to balance classes.
+            Must be one of [downsampling, upsampling]
+
+    Python API examples:
+
+    .. code-block:: python
+
+        import os
+        from torch import nn, optim
+        from torch.utils.data import DataLoader
+        from catalyst import dl
+        from catalyst.data import ToTensor, BalanceClassSampler
+        from catalyst.contrib.datasets import MNIST
+
+        train_data = MNIST(os.getcwd(), train=True, download=True, transform=ToTensor())
+        train_labels = train_data.targets.cpu().numpy().tolist()
+        train_sampler = BalanceClassSampler(train_labels, mode=5000)
+        valid_data = MNIST(os.getcwd(), train=False)
+
+        loaders = {
+            "train": DataLoader(train_data, sampler=train_sampler, batch_size=32),
+            "valid": DataLoader(valid_data, batch_size=32),
+        }
+
+        model = nn.Sequential(nn.Flatten(), nn.Linear(28 * 28, 10))
+        criterion = nn.CrossEntropyLoss()
+        optimizer = optim.Adam(model.parameters(), lr=0.02)
+
+        runner = dl.SupervisedRunner()
+        # model training
+        runner.train(
+            model=model,
+            criterion=criterion,
+            optimizer=optimizer,
+            loaders=loaders,
+            num_epochs=1,
+            logdir="./logs",
+            valid_loader="valid",
+            valid_metric="loss",
+            minimize_valid_metric=True,
+            verbose=True,
+        )
+    """
+
+    def __init__(self, labels: List[int], mode: Union[str, int] = "downsampling"):
+        """Sampler initialisation."""
+        super().__init__(labels)
+
+        labels = np.array(labels)
+        samples_per_class = {label: (labels == label).sum() for label in set(labels)}
+
+        self.lbl2idx = {
+            label: np.arange(len(labels))[labels == label].tolist()
+            for label in set(labels)
+        }
+
+        if isinstance(mode, str):
+            assert mode in ["downsampling", "upsampling"]
+
+        if isinstance(mode, int) or mode == "upsampling":
+            samples_per_class = (
+                mode if isinstance(mode, int) else max(samples_per_class.values())
+            )
+        else:
+            samples_per_class = min(samples_per_class.values())
+
+        self.labels = labels
+        self.samples_per_class = samples_per_class
+        self.length = self.samples_per_class * len(set(labels))
+
+    def __iter__(self) -> Iterator[int]:
+        """
+        Returns:
+            iterator of indices of stratified sample
+        """
+        indices = []
+        for key in sorted(self.lbl2idx):
+            replace_flag = self.samples_per_class > len(self.lbl2idx[key])
+            indices += np.random.choice(
+                self.lbl2idx[key], self.samples_per_class, replace=replace_flag
+            ).tolist()
+        assert len(indices) == self.length
+        np.random.shuffle(indices)
+
+        return iter(indices)
+
+    def __len__(self) -> int:
+        """
+        Returns:
+             length of result sample
+        """
+        return self.length
+
+class DistributedSamplerWrapper(DistributedSampler):
+    """
+    Wrapper over `Sampler` for distributed training.
+    Allows you to use any sampler in distributed mode.
+
+    It is especially useful in conjunction with
+    `torch.nn.parallel.DistributedDataParallel`. In such case, each
+    process can pass a DistributedSamplerWrapper instance as a DataLoader
+    sampler, and load a subset of subsampled data of the original dataset
+    that is exclusive to it.
+
+    .. note::
+        Sampler is assumed to be of constant size.
+    """
+
+    def __init__(
+        self,
+        sampler,
+        num_replicas: Optional[int] = None,
+        rank: Optional[int] = None,
+        shuffle: bool = True,
+    ):
+        """
+
+        Args:
+            sampler: Sampler used for subsampling
+            num_replicas (int, optional): Number of processes participating in
+                distributed training
+            rank (int, optional): Rank of the current process
+                within ``num_replicas``
+            shuffle (bool, optional): If true (default),
+                sampler will shuffle the indices
+        """
+        super(DistributedSamplerWrapper, self).__init__(
+            DatasetFromSampler(sampler),
+            num_replicas=num_replicas,
+            rank=rank,
+            shuffle=shuffle,
+        )
+        self.sampler = sampler
+
+    def __iter__(self) -> Iterator[int]:
+        """Iterate over sampler.
+
+        Returns:
+            python iterator
+        """
+        self.dataset = DatasetFromSampler(self.sampler)
+        indexes_of_indexes = super().__iter__()
+        subsampler_indexes = self.dataset
+        return iter(itemgetter(*indexes_of_indexes)(subsampler_indexes))
+
+class RASampler(Sampler):
+    """Sampler that restricts data loading to a subset of the dataset for distributed,
+    with repeated augmentation.
+    It ensures that different each augmented version of a sample will be visible to a
+    different process (GPU)
+    Heavily based on torch.utils.data.DistributedSampler
+    """
+
+    def __init__(self, dataset, num_replicas=None, rank=None, shuffle=True, num_repeats: int = 3):
+        if num_replicas is None:
+            if not dist.is_available():
+                raise RuntimeError("Requires distributed package to be available")
+            num_replicas = dist.get_world_size()
+        if rank is None:
+            if not dist.is_available():
+                raise RuntimeError("Requires distributed package to be available")
+            rank = dist.get_rank()
+        if num_repeats < 1:
+            raise ValueError("num_repeats should be greater than 0")
+        self.dataset = dataset
+        self.num_replicas = num_replicas
+        self.rank = rank
+        self.num_repeats = num_repeats
+        self.epoch = 0
+        self.num_samples = int(math.ceil(len(self.dataset) * self.num_repeats / self.num_replicas))
+        self.total_size = self.num_samples * self.num_replicas
+        # self.num_selected_samples = int(math.ceil(len(self.dataset) / self.num_replicas))
+        self.num_selected_samples = int(math.floor(len(self.dataset) // 256 * 256 / self.num_replicas))
+        self.shuffle = shuffle
+
+    def __iter__(self):
+        if self.shuffle:
+            # deterministically shuffle based on epoch
+            g = torch.Generator()
+            g.manual_seed(self.epoch)
+            indices = torch.randperm(len(self.dataset), generator=g)
+        else:
+            indices = torch.arange(start=0, end=len(self.dataset))
+
+        # add extra samples to make it evenly divisible
+        indices = torch.repeat_interleave(indices, repeats=self.num_repeats, dim=0).tolist()
+        padding_size: int = self.total_size - len(indices)
+        if padding_size > 0:
+            indices += indices[:padding_size]
+        assert len(indices) == self.total_size
+
+        # subsample
+        indices = indices[self.rank:self.total_size:self.num_replicas]
+        assert len(indices) == self.num_samples
+
+        return iter(indices[:self.num_selected_samples])
+
+    def __len__(self):
+        return self.num_selected_samples
+
+    def set_epoch(self, epoch):
+        self.epoch = epoch

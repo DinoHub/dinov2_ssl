@@ -14,6 +14,7 @@ from typing import List, Optional
 
 import numpy as np
 import torch
+import torch.distributed as dist
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.nn.parallel import DistributedDataParallel
@@ -238,7 +239,8 @@ def setup_linear_classifiers(sample_output, n_last_blocks_list, learning_rates, 
     linear_classifiers_dict = nn.ModuleDict()
     optim_param_groups = []
     for n in n_last_blocks_list:
-        for avgpool in [False, True]:
+        # for avgpool in [False, True]:
+        for avgpool in [False]:
             for _lr in learning_rates:
                 lr = scale_lr(_lr, batch_size)
                 out_dim = create_linear_input(sample_output, use_n_blocks=n, use_avgpool=avgpool).shape[1]
@@ -368,9 +370,9 @@ def eval_linear(
     if kwargs.get('logit_adjusted_loss', False):
         cls_num_list = get_cls_num_list(train_data_loader.dataset.get_targets())
         cls_num_list = torch.Tensor(cls_num_list).to("cuda")
-        train_loss_fn = LogitAdjustedLoss(cls_num_list)   
+        train_loss_fn = LogitAdjustedLoss(cls_num_list)
     else:
-        train_loss_fn = nn.CrossEntropyLoss() 
+        train_loss_fn = nn.CrossEntropyLoss()
 
     for data, labels in metric_logger.log_every(
         train_data_loader,
@@ -500,12 +502,14 @@ def run_eval_linear(
     val_dataset_str,
     batch_size,
     epochs,
-    epoch_length,
+    # epoch_length,
     num_workers,
     save_checkpoint_frequency,
-    eval_period_iterations,
+    # eval_period_iterations,
     learning_rates,
     autocast_dtype,
+    num_classes,
+    total_batch_size,
     test_dataset_strs=None,
     resume=True,
     classifier_fpath=None,
@@ -515,120 +519,149 @@ def run_eval_linear(
     test_metric_types=None,
     **kwargs,
 ):
-    seed = 0
+    try:
+        seed = 0
 
-    if test_dataset_strs is None:
-        test_dataset_strs = [val_dataset_str]
-    if test_metric_types is None:
-        test_metric_types = [val_metric_type] * len(test_dataset_strs)
-    else:
-        assert len(test_metric_types) == len(test_dataset_strs)
-    assert len(test_dataset_strs) == len(test_class_mapping_fpaths)
-
-    train_transform = make_classification_train_transform()
-    train_dataset = make_dataset(
-        dataset_str=train_dataset_str,
-        transform=train_transform,
-    )
-    training_num_classes = len(torch.unique(torch.Tensor(train_dataset.get_targets().astype(int))))
-    if kwargs.get('balanced_sampler', False):
-        sampler_type = SamplerType.SHARDED_INFINITE_BALANCED
-        balanced_sampler_mode = kwargs['balanced_sampler_mode']
-    else:
-        balanced_sampler_mode = None
-        sampler_type = SamplerType.SHARDED_INFINITE
-        # sampler_type = SamplerType.INFINITE
-
-    n_last_blocks_list = [1, 4]
-    n_last_blocks = max(n_last_blocks_list)
-    autocast_ctx = partial(torch.cuda.amp.autocast, enabled=True, dtype=autocast_dtype)
-    feature_model = ModelWithIntermediateLayers(model, n_last_blocks, autocast_ctx)
-    sample_output = feature_model(train_dataset[0][0].unsqueeze(0).cuda())
-
-    linear_classifiers, optim_param_groups = setup_linear_classifiers(
-        sample_output,
-        n_last_blocks_list,
-        learning_rates,
-        batch_size,
-        training_num_classes,
-    )
-
-    optimizer = torch.optim.SGD(optim_param_groups, momentum=0.9, weight_decay=0)
-    max_iter = epochs * epoch_length
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, max_iter, eta_min=0)
-    checkpointer = Checkpointer(linear_classifiers, output_dir, optimizer=optimizer, scheduler=scheduler)
-    start_iter = checkpointer.resume_or_load(classifier_fpath or "", resume=resume).get("iteration", -1) + 1
-    train_data_loader = make_data_loader(
-        dataset=train_dataset,
-        batch_size=batch_size,
-        num_workers=num_workers,
-        shuffle=True,
-        seed=seed,
-        sampler_type=sampler_type,
-        sampler_advance=start_iter,
-        drop_last=True,
-        persistent_workers=True,
-        balanced_sampler_mode=balanced_sampler_mode,
-    )
-    val_data_loader = make_eval_data_loader(val_dataset_str, batch_size, num_workers, val_metric_type)
-
-    checkpoint_period = save_checkpoint_frequency * epoch_length
-
-    if val_class_mapping_fpath is not None:
-        logger.info(f"Using class mapping from {val_class_mapping_fpath}")
-        val_class_mapping = np.load(val_class_mapping_fpath)
-    else:
-        val_class_mapping = None
-
-    test_class_mappings = []
-    for class_mapping_fpath in test_class_mapping_fpaths:
-        if class_mapping_fpath is not None and class_mapping_fpath != "None":
-            logger.info(f"Using class mapping from {class_mapping_fpath}")
-            class_mapping = np.load(class_mapping_fpath)
+        if test_dataset_strs is None:
+            test_dataset_strs = [val_dataset_str]
+        if test_metric_types is None:
+            test_metric_types = [val_metric_type] * len(test_dataset_strs)
         else:
-            class_mapping = None
-        test_class_mappings.append(class_mapping)
+            assert len(test_metric_types) == len(test_dataset_strs)
+        assert len(test_dataset_strs) == len(test_class_mapping_fpaths)
 
-    metrics_file_path = os.path.join(output_dir, "results_eval_linear.json")
-    val_results_dict, feature_model, linear_classifiers, iteration = eval_linear(
-        feature_model=feature_model,
-        linear_classifiers=linear_classifiers,
-        train_data_loader=train_data_loader,
-        val_data_loader=val_data_loader,
-        metrics_file_path=metrics_file_path,
-        optimizer=optimizer,
-        scheduler=scheduler,
-        output_dir=output_dir,
-        max_iter=max_iter,
-        checkpoint_period=checkpoint_period,
-        running_checkpoint_period=epoch_length,
-        eval_period=eval_period_iterations,
-        metric_type=val_metric_type,
-        training_num_classes=training_num_classes,
-        resume=resume,
-        val_class_mapping=val_class_mapping,
-        classifier_fpath=classifier_fpath,
-        **kwargs,
-    )
-    results_dict = {}
-    if len(test_dataset_strs) > 1 or test_dataset_strs[0] != val_dataset_str:
-        results_dict = test_on_datasets(
-            feature_model,
-            linear_classifiers,
-            test_dataset_strs,
-            batch_size,
-            0,  # num_workers,
-            test_metric_types,
-            metrics_file_path,
-            training_num_classes,
-            iteration,
-            val_results_dict["best_classifier"]["name"],
-            prefixstring="",
-            test_class_mappings=test_class_mappings,
+        train_transform = make_classification_train_transform()
+        train_dataset = make_dataset(
+            dataset_str=train_dataset_str,
+            transform=train_transform,
         )
-    results_dict["best_classifier"] = val_results_dict["best_classifier"]["name"]
-    results_dict[f"{val_dataset_str}_accuracy"] = 100.0 * val_results_dict["best_classifier"]["accuracy"]
-    logger.info("Test Results Dict " + str(results_dict))
+        training_num_classes = len(torch.unique(torch.Tensor(train_dataset.get_targets().astype(int))))
+        if kwargs.get('balanced_sampler', False):
+            sampler_type = SamplerType.SHARDED_INFINITE_BALANCED
+            balanced_sampler_mode = kwargs['balanced_sampler_mode']
+        else:
+            balanced_sampler_mode = None
+            sampler_type = SamplerType.SHARDED_INFINITE
+            # sampler_type = SamplerType.INFINITE
+
+        if kwargs.get('balanced_sampler', False):
+            if isinstance(kwargs['balanced_sampler_mode'], int):
+                epoch_length = (kwargs['balanced_sampler_mode'] * num_classes) // total_batch_size
+            else:
+                raise NotImplementedError(f"Unknown balanced sampler mode: {kwargs['balanced_sampler_mode']}")
+        else:
+            epoch_length = len(train_dataset) // total_batch_size
+
+        eval_period_iterations = epoch_length
+
+        # n_last_blocks_list = [1, 4]
+        n_last_blocks_list = [1]
+        n_last_blocks = max(n_last_blocks_list)
+        autocast_ctx = partial(torch.cuda.amp.autocast, enabled=True, dtype=autocast_dtype)
+        feature_model = ModelWithIntermediateLayers(model, n_last_blocks, autocast_ctx)
+        sample_output = feature_model(train_dataset[0][0].unsqueeze(0).cuda())
+
+        linear_classifiers, optim_param_groups = setup_linear_classifiers(
+            sample_output,
+            n_last_blocks_list,
+            learning_rates,
+            batch_size,
+            training_num_classes,
+        )
+
+        print(f'Feature Model: {feature_model}')
+        print(f'Linear Classifiers: {linear_classifiers}')
+
+        optimizer = torch.optim.SGD(optim_param_groups, momentum=0.9, weight_decay=0)
+        max_iter = epochs * epoch_length
+        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, max_iter, eta_min=0)
+        checkpointer = Checkpointer(linear_classifiers, output_dir, optimizer=optimizer, scheduler=scheduler)
+        start_iter = checkpointer.resume_or_load(classifier_fpath or "", resume=resume).get("iteration", -1) + 1
+        train_data_loader = make_data_loader(
+            dataset=train_dataset,
+            batch_size=batch_size,
+            num_workers=num_workers,
+            shuffle=True,
+            seed=seed,
+            sampler_type=sampler_type,
+            sampler_advance=start_iter,
+            drop_last=True,
+            # persistent_workers=True,
+            balanced_sampler_mode=balanced_sampler_mode,
+        )
+        val_data_loader = make_eval_data_loader(val_dataset_str, batch_size, num_workers, val_metric_type)
+
+        checkpoint_period = save_checkpoint_frequency * epoch_length
+
+        if val_class_mapping_fpath is not None:
+            logger.info(f"Using class mapping from {val_class_mapping_fpath}")
+            val_class_mapping = np.load(val_class_mapping_fpath)
+        else:
+            val_class_mapping = None
+
+        test_class_mappings = []
+        for class_mapping_fpath in test_class_mapping_fpaths:
+            if class_mapping_fpath is not None and class_mapping_fpath != "None":
+                logger.info(f"Using class mapping from {class_mapping_fpath}")
+                class_mapping = np.load(class_mapping_fpath)
+            else:
+                class_mapping = None
+            test_class_mappings.append(class_mapping)
+
+        metrics_file_path = os.path.join(output_dir, "results_eval_linear.json")
+        val_results_dict, feature_model, linear_classifiers, iteration = eval_linear(
+            feature_model=feature_model,
+            linear_classifiers=linear_classifiers,
+            train_data_loader=train_data_loader,
+            val_data_loader=val_data_loader,
+            metrics_file_path=metrics_file_path,
+            optimizer=optimizer,
+            scheduler=scheduler,
+            output_dir=output_dir,
+            max_iter=max_iter,
+            checkpoint_period=checkpoint_period,
+            running_checkpoint_period=epoch_length,
+            eval_period=eval_period_iterations,
+            metric_type=val_metric_type,
+            training_num_classes=training_num_classes,
+            resume=resume,
+            val_class_mapping=val_class_mapping,
+            classifier_fpath=classifier_fpath,
+            **kwargs,
+        )
+        results_dict = {}
+        if len(test_dataset_strs) > 1 or test_dataset_strs[0] != val_dataset_str:
+            results_dict = test_on_datasets(
+                feature_model,
+                linear_classifiers,
+                test_dataset_strs,
+                batch_size,
+                0,  # num_workers,
+                test_metric_types,
+                metrics_file_path,
+                training_num_classes,
+                iteration,
+                val_results_dict["best_classifier"]["name"],
+                prefixstring="",
+                test_class_mappings=test_class_mappings,
+            )
+        results_dict["best_classifier"] = val_results_dict["best_classifier"]["name"]
+        results_dict[f"{val_dataset_str}_accuracy"] = 100.0 * val_results_dict["best_classifier"]["accuracy"]
+        logger.info("Test Results Dict " + str(results_dict))
+
+        # save classifier weights
+        save_path = os.path.join(output_dir, "classifier_weights.pth")
+        classifiers_dict = remove_ddp_wrapper(linear_classifiers).classifiers_dict[results_dict["best_classifier"]]
+        classifier_weights = {
+            "weight": classifiers_dict.linear.weight,
+            "bias": classifiers_dict.linear.bias,
+        }
+
+        torch.save(classifier_weights, save_path)
+
+    finally:
+        dist.barrier()
+        dist.destroy_process_group()
 
     return results_dict
 
@@ -643,12 +676,14 @@ def main(args):
         test_dataset_strs=args.test_dataset_strs,
         batch_size=args.batch_size,
         epochs=args.epochs,
-        epoch_length=args.epoch_length,
+        # epoch_length=args.epoch_length,
         num_workers=args.num_workers,
         save_checkpoint_frequency=args.save_checkpoint_frequency,
-        eval_period_iterations=args.eval_period_iterations,
+        # eval_period_iterations=args.eval_period_iterations,
         learning_rates=args.learning_rates,
         autocast_dtype=autocast_dtype,
+        num_classes=args.num_classes,
+        total_batch_size=args.total_batch_size,
         resume=not args.no_resume,
         classifier_fpath=args.classifier_fpath,
         val_metric_type=args.val_metric_type,
