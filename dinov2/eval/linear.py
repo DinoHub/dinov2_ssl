@@ -4,12 +4,12 @@
 # found in the LICENSE file in the root directory of this source tree.
 
 import argparse
-from collections import defaultdict
-from functools import partial
 import json
 import logging
 import os
 import sys
+from collections import defaultdict
+from functools import partial
 from typing import List, Optional
 
 import numpy as np
@@ -17,15 +17,14 @@ import torch
 import torch.distributed as dist
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.nn.parallel import DistributedDataParallel
 from fvcore.common.checkpoint import Checkpointer, PeriodicCheckpointer
+from torch.nn.parallel import DistributedDataParallel
 
+import dinov2.distributed as distributed
 from dinov2.data import SamplerType, make_data_loader, make_dataset
 from dinov2.data.transforms import make_classification_eval_transform, make_classification_train_transform
-import dinov2.distributed as distributed
 from dinov2.eval.metrics import MetricType, build_metric
-from dinov2.eval.setup import get_args_parser as get_setup_args_parser
-from dinov2.eval.setup import setup_and_build_model
+from dinov2.eval.setup import get_args_parser as get_setup_args_parser, setup_and_build_model
 from dinov2.eval.utils import ModelWithIntermediateLayers, evaluate
 from dinov2.logging import MetricLogger
 
