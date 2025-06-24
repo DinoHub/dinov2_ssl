@@ -8,9 +8,12 @@
 # If you want to add extra datasets, you can place them in the train folder following the same folder structure.
 # Then, you need to modify the training config in the `./dinov2/configs/custom/vitb16.yml` file.
 
+CONFIG_FILE=./dinov2/configs/custom/vitb16.yml
 DATASET_ROOT=/path/to/dataset
+OUTPUT_DIR=./artifacts-dinov2/ViT-B-16
+
 
 torchrun --nproc_per_node=1 train_dinov2.py \
-    --config-file ./dinov2/configs/custom/vitb16.yml \
-    --output-dir ./artifacts-dinov2/ViT-B-16 \
+    --config-file $CONFIG_FILE \
+    --output-dir $OUTPUT_DIR \
     train.dataset_path=DINOv2Dataset:root=$DATASET_ROOT
