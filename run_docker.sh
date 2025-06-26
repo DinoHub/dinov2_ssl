@@ -9,4 +9,4 @@ docker run -it --rm \
 	--ipc host \
 	--ulimit memlock=-1 \
 	--ulimit stack=67108864 \
-	vit_dinov2:2.0
+	vit_dinov2:4.0

@@ -1,4 +1,4 @@
-model:
+student:
   arch: vit_giant2
   block_chunks: 4
   patch_size: 14

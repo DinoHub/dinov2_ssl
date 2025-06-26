@@ -79,21 +79,21 @@ def get_args_parser(
         type=int,
         help="Number de Workers",
     )
-    parser.add_argument(
-        "--epoch-length",
-        type=int,
-        help="Length of an epoch in number of iterations",
-    )
+    # parser.add_argument(
+    #     "--epoch-length",
+    #     type=int,
+    #     help="Length of an epoch in number of iterations",
+    # )
     parser.add_argument(
         "--save-checkpoint-frequency",
         type=int,
         help="Number of epochs between two named checkpoint saves.",
     )
-    parser.add_argument(
-        "--eval-period-iterations",
-        type=int,
-        help="Number of iterations between two evaluations.",
-    )
+    # parser.add_argument(
+    #     "--eval-period-iterations",
+    #     type=int,
+    #     help="Number of iterations between two evaluations.",
+    # )
     parser.add_argument(
         "--learning-rates",
         nargs="+",
@@ -141,9 +141,9 @@ def get_args_parser(
         epochs=10,
         batch_size=128,
         num_workers=8,
-        epoch_length=1250,
+        # epoch_length=1250,
         save_checkpoint_frequency=20,
-        eval_period_iterations=1250,
+        # eval_period_iterations=1250,
         learning_rates=[1e-5, 2e-5, 5e-5, 1e-4, 2e-4, 5e-4, 1e-3, 2e-3, 5e-3, 1e-2, 2e-2, 5e-2, 0.1],
         val_metric_type=MetricType.MEAN_ACCURACY,
         test_metric_types=None,

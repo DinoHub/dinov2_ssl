@@ -42,19 +42,23 @@ def get_args_parser(add_help: bool = True):
     parser.add_argument(
         "opts",
         help="""
-Modify config options at the end of the command. For Yacs configs, use
-space-separated "PATH.KEY VALUE" pairs.
-For python-based LazyConfig, use "path.key=value".
+            Modify config options at the end of the command. For Yacs configs, use
+            space-separated "PATH.KEY VALUE" pairs.
+            For python-based LazyConfig, use "path.key=value".
         """.strip(),
         default=None,
         nargs=argparse.REMAINDER,
     )
     parser.add_argument(
         "--output-dir",
-        "--output_dir",
         default="",
         type=str,
         help="Output directory to save logs and checkpoints",
+    )
+    parser.add_argument(
+        "--batch-size",
+        type=int,
+        help="Batch Size (per GPU)",
     )
 
     return parser
@@ -64,30 +68,29 @@ def build_optimizer(cfg, params_groups):
     return torch.optim.AdamW(params_groups, betas=(cfg.optim.adamw_beta1, cfg.optim.adamw_beta2))
 
 
-def build_schedulers(cfg):
-    OFFICIAL_EPOCH_LENGTH = cfg.train.OFFICIAL_EPOCH_LENGTH
+def build_schedulers(cfg, epoch_length):
     lr = dict(
         base_value=cfg.optim["lr"],
         final_value=cfg.optim["min_lr"],
-        total_iters=cfg.optim["epochs"] * OFFICIAL_EPOCH_LENGTH,
-        warmup_iters=cfg.optim["warmup_epochs"] * OFFICIAL_EPOCH_LENGTH,
+        total_iters=cfg.optim["epochs"] * epoch_length,
+        warmup_iters=cfg.optim["warmup_epochs"] * epoch_length,
         start_warmup_value=0,
     )
     wd = dict(
         base_value=cfg.optim["weight_decay"],
         final_value=cfg.optim["weight_decay_end"],
-        total_iters=cfg.optim["epochs"] * OFFICIAL_EPOCH_LENGTH,
+        total_iters=cfg.optim["epochs"] * epoch_length,
     )
     momentum = dict(
         base_value=cfg.teacher["momentum_teacher"],
         final_value=cfg.teacher["final_momentum_teacher"],
-        total_iters=cfg.optim["epochs"] * OFFICIAL_EPOCH_LENGTH,
+        total_iters=cfg.optim["epochs"] * epoch_length,
     )
     teacher_temp = dict(
         base_value=cfg.teacher["teacher_temp"],
         final_value=cfg.teacher["teacher_temp"],
-        total_iters=cfg.teacher["warmup_teacher_temp_epochs"] * OFFICIAL_EPOCH_LENGTH,
-        warmup_iters=cfg.teacher["warmup_teacher_temp_epochs"] * OFFICIAL_EPOCH_LENGTH,
+        total_iters=cfg.teacher["warmup_teacher_temp_epochs"] * epoch_length,
+        warmup_iters=cfg.teacher["warmup_teacher_temp_epochs"] * epoch_length,
         start_warmup_value=cfg.teacher["warmup_teacher_temp"],
     )
 
@@ -98,7 +101,7 @@ def build_schedulers(cfg):
     last_layer_lr_schedule = CosineScheduler(**lr)
 
     last_layer_lr_schedule.schedule[
-        : cfg.optim["freeze_last_layer_epochs"] * OFFICIAL_EPOCH_LENGTH
+        : cfg.optim["freeze_last_layer_epochs"] * epoch_length
     ] = 0  # mimicking the original schedules
 
     logger.info("Schedulers ready.")
@@ -139,34 +142,6 @@ def do_train(cfg, model, resume=False):
         inputs_dtype = torch.half
         fp16_scaler = model.fp16_scaler  # for mixed precision training
 
-        # setup optimizer
-
-        optimizer = build_optimizer(cfg, model.get_params_groups())
-        (
-            lr_schedule,
-            wd_schedule,
-            momentum_schedule,
-            teacher_temp_schedule,
-            last_layer_lr_schedule,
-        ) = build_schedulers(cfg)
-
-        # checkpointer
-        checkpointer = FSDPCheckpointer(model, cfg.train.output_dir, optimizer=optimizer, save_to_disk=True)
-
-        start_iter = checkpointer.resume_or_load(cfg.MODEL.WEIGHTS, resume=resume).get("iteration", -1) + 1
-
-        OFFICIAL_EPOCH_LENGTH = cfg.train.OFFICIAL_EPOCH_LENGTH
-        max_iter = cfg.optim.epochs * OFFICIAL_EPOCH_LENGTH
-
-        periodic_checkpointer = PeriodicCheckpointer(
-            checkpointer,
-            period=3 * OFFICIAL_EPOCH_LENGTH,
-            max_iter=max_iter,
-            max_to_keep=5,
-        )
-
-        # setup data preprocessing
-
         img_size = cfg.crops.global_crops_size
         patch_size = cfg.student.patch_size
         n_tokens = (img_size // patch_size) ** 2
@@ -194,13 +169,37 @@ def do_train(cfg, model, resume=False):
             grad_accum_steps=accum_steps,
         )
 
-        # setup data loader
-
         dataset = make_dataset(
             dataset_str=cfg.train.dataset_path,
             transform=data_transform,
             target_transform=lambda _: (),
         )
+
+        epoch_length = len(dataset) // (cfg.train.batch_size_per_gpu * distributed.get_global_size())
+        eval_period_iterations = epoch_length
+
+        optimizer = build_optimizer(cfg, model.get_params_groups())
+        (
+            lr_schedule,
+            wd_schedule,
+            momentum_schedule,
+            teacher_temp_schedule,
+            last_layer_lr_schedule,
+        ) = build_schedulers(cfg, epoch_length)
+
+        checkpointer = FSDPCheckpointer(model, cfg.train.output_dir, optimizer=optimizer, save_to_disk=True)
+
+        start_iter = checkpointer.resume_or_load(cfg.MODEL.WEIGHTS, resume=resume).get("iteration", -1) + 1
+
+        max_iter = cfg.optim.epochs * epoch_length
+
+        periodic_checkpointer = PeriodicCheckpointer(
+            checkpointer,
+            period=3 * epoch_length,
+            max_iter=max_iter,
+            max_to_keep=5,
+        )
+
         # sampler_type = SamplerType.INFINITE
         sampler_type = SamplerType.SHARDED_INFINITE
         data_loader = make_data_loader(
@@ -208,14 +207,12 @@ def do_train(cfg, model, resume=False):
             batch_size=cfg.train.batch_size_per_gpu,
             num_workers=cfg.train.num_workers,
             shuffle=True,
-            seed=start_iter,  # TODO: Fix this -- cfg.train.seed
+            seed=cfg.train.seed,
             sampler_type=sampler_type,
-            sampler_advance=0,  # TODO(qas): fix this -- start_iter * cfg.train.batch_size_per_gpu,
+            sampler_advance=start_iter * cfg.train.batch_size_per_gpu,
             drop_last=True,
             collate_fn=collate_fn,
         )
-
-        # training loop
 
         iteration = start_iter
 
@@ -235,16 +232,12 @@ def do_train(cfg, model, resume=False):
             if iteration > max_iter:
                 return
 
-            # apply schedules
-
             lr = lr_schedule[iteration]
             wd = wd_schedule[iteration]
             mom = momentum_schedule[iteration]
             teacher_temp = teacher_temp_schedule[iteration]
             last_layer_lr = last_layer_lr_schedule[iteration]
             apply_optim_scheduler(optimizer, lr, wd, last_layer_lr)
-
-            # compute losses
 
             optimizer.zero_grad(set_to_none=True)
             loss_dict = defaultdict(float)
@@ -253,8 +246,6 @@ def do_train(cfg, model, resume=False):
                 for k, v in shard_loss_dict.items():
                     loss_dict[k] += v.detach()  # .detach(): keep the graph small / avoid dangling references
             loss_dict = {k: v / accum_steps for k, v in loss_dict.items()}
-
-            # clip gradients
 
             if fp16_scaler is not None:
                 if cfg.optim.clip_grad:
@@ -272,8 +263,6 @@ def do_train(cfg, model, resume=False):
             # perform teacher EMA update
 
             model.update_teacher(mom)
-
-            # logging
 
             if distributed.get_global_size() > 1:
                 for v in loss_dict.values():
@@ -294,7 +283,7 @@ def do_train(cfg, model, resume=False):
 
             # checkpointing and testing
 
-            if cfg.evaluation.eval_period_iterations > 0 and (iteration + 1) % cfg.evaluation.eval_period_iterations == 0:
+            if eval_period_iterations > 0 and (iteration + 1) % eval_period_iterations == 0:
                 do_test(cfg, model, f"training_{iteration}")
                 torch.cuda.synchronize()
             periodic_checkpointer.step(iteration)

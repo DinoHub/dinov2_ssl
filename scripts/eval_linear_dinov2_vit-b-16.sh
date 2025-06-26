@@ -1,10 +1,6 @@
 # Linear probing script for the ViT-B/16 model with self-supervised pretrained weight using the DINOv2 module, with reference to:
 # https://github.com/facebookresearch/dinov2?tab=readme-ov-file#linear-classification-with-data-augmentation-on-imagenet-1k
 
-# The default number of GPUs: 4, so the total batch size is 512.
-# Change the number of GPUs and batch size accordingly if the number of GPUs is different.
-# Remind to check the `eval_linear.py` script for the arguments (`ncls`, `ngpus`, `batch_size`, `epoch_length` & `epochs`) used in the script.
-
 # According to the discussion in the DINOv2 repo, the teacher checkpoint is used for linear probing.
 # The path to the teacher checkpoint is something like `./artifacts-dinov2/ViT-B-16/eval/training_<iteration>/teacher_checkpoint.pth`.
 

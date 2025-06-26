@@ -262,7 +262,7 @@ def enable(*, set_cuda_current_device: bool = True, overwrite: bool = False, all
         os.environ[key] = value
 
     dist.init_process_group(backend="nccl")
-    dist.barrier()
+    dist.barrier(device_ids=[torch_env.local_rank])
 
     # Finalize setup
     _LOCAL_RANK = torch_env.local_rank

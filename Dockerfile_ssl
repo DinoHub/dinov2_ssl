@@ -1,8 +1,8 @@
-# docker build -f Dockerfile_ssl -t vit_dinov2:2.0 .
+# docker build -f Dockerfile_ssl -t vit_dinov2:4.0 .
 
 # MUST USE PYTHON >=3.9
-# FROM nvidia/cuda:12.0.0-cudnn8-devel-ubuntu22.04
-FROM nvidia/cuda:11.8.0-cudnn8-devel-ubuntu22.04
+FROM nvidia/cuda:12.0.0-cudnn8-devel-ubuntu22.04
+# FROM nvidia/cuda:11.8.0-cudnn8-devel-ubuntu22.04
 
 ENV DEBIAN_FRONTEND=noninteractive
 
@@ -44,11 +44,14 @@ RUN pip3 install --no-cache-dir \
     pandas \
     scikit-learn \
     tensorboard \
-    timm
+    timm \
+    torchmetrics
 
 RUN pip3 install --no-cache-dir \
-    torchvision --index-url https://download.pytorch.org/whl/cu121 \
-    xformers --index-url https://download.pytorch.org/whl/cu121
+    'numpy<2' \
+    torch==2.1.0 --index-url https://download.pytorch.org/whl/cu121 \
+    torchvision==0.16.0 --index-url https://download.pytorch.org/whl/cu121 \
+    xformers
 
 RUN pip3 install --no-cache-dir \
     boto3 \
